@@ -42,8 +42,8 @@ DroidCam works on those older phones. Its Linux client already does the hard par
 ## Install
 
 ```bash
-git clone https://github.com/testy-cool/phone-webcam-linux.git
-cd phone-webcam-linux
+git clone https://github.com/testy-cool/usb-phone-webcam-linux.git
+cd usb-phone-webcam-linux
 install -m 755 phonecam ~/.local/bin/phonecam
 ```
 
