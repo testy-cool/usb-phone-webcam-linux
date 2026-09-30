@@ -1,0 +1,129 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["typer>=0.12", "rich>=13.0"]
+# ///
+"""Use an Android phone as a webcam over USB, through DroidCam."""
+
+import os
+import subprocess
+import time
+
+import typer
+from rich.console import Console
+
+out = Console()
+err = Console(stderr=True)
+
+APP = "com.dev47apps.droidcam"
+
+cli = typer.Typer(
+    help=(
+        "Use an Android phone as a webcam over USB.\n\n"
+        "Run with no command to start. In your app, pick "
+        "[bold]Loopback video device[/bold]. The phone must be plugged in and unlocked."
+    ),
+    rich_markup_mode="rich",
+    add_completion=False,
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+
+
+def run(cmd: list[str], serial: str, **kw) -> subprocess.CompletedProcess:
+    env = {**os.environ, "ANDROID_SERIAL": serial}
+    return subprocess.run(cmd, env=env, capture_output=True, text=True, **kw)
+
+
+def running() -> bool:
+    return subprocess.run(["pgrep", "-x", "droidcam-cli"], capture_output=True).returncode == 0
+
+
+def stop_stream() -> bool:
+    return subprocess.run(["pkill", "-x", "droidcam-cli"], capture_output=True).returncode == 0
+
+
+@cli.callback()
+def start(
+    ctx: typer.Context,
+    serial: str = typer.Option(
+        None,
+        "--serial",
+        envvar="PHONECAM_SERIAL",
+        help="adb serial of the phone. Needed only when several phones are connected.",
+    ),
+    device: str = typer.Option("/dev/video0", "--device", help="DroidCam loopback device."),
+    port: int = typer.Option(4747, "--port", help="DroidCam port on the phone."),
+    hflip: bool = typer.Option(False, "--hflip", help="Mirror the picture left to right."),
+    vflip: bool = typer.Option(False, "--vflip", help="Flip the picture upside down."),
+):
+    """Start the phone camera."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    lines = run(["adb", "devices"], serial or "").stdout.splitlines()[1:]
+    ready = [ln.split()[0] for ln in lines if ln.strip().endswith("device")]
+    if serial is None:
+        if not ready:
+            err.print("[red]No phone found.[/red] Check the cable and that USB debugging is allowed.")
+            raise typer.Exit(1)
+        if len(ready) > 1:
+            err.print(f"[red]Several phones connected:[/red] {', '.join(ready)}. Pick one with --serial.")
+            raise typer.Exit(1)
+        serial = ready[0]
+    elif serial not in ready:
+        err.print(f"[red]Phone {serial} is not connected.[/red] Check the cable and USB debugging.")
+        raise typer.Exit(1)
+
+    stop_stream()
+    run(["adb", "shell", "input", "keyevent", "KEYCODE_WAKEUP"], serial)
+    if "isKeyguardShowing=true" in run(["adb", "shell", "dumpsys", "window"], serial).stdout:
+        err.print("[yellow]The phone is locked.[/yellow] Unlock it, then run phonecam again.")
+        raise typer.Exit(1)
+
+    run(["adb", "shell", "am", "start", "-n", f"{APP}/.DroidCam"], serial)
+    time.sleep(2)
+
+    cmd = ["droidcam-cli", "-nocontrols", f"-dev={device}"]
+    if hflip:
+        cmd.append("-hflip")
+    if vflip:
+        cmd.append("-vflip")
+    cmd += ["adb", str(port)]
+
+    log = open("/tmp/phonecam.log", "w")
+    subprocess.Popen(
+        cmd,
+        env={**os.environ, "ANDROID_SERIAL": serial},
+        stdout=log,
+        stderr=log,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    time.sleep(4)
+
+    failed = open("/tmp/phonecam.log").read()
+    if not running() or "Error" in failed:
+        err.print(f"[red]Phone camera failed to start.[/red]\n{failed.strip()}")
+        stop_stream()
+        raise typer.Exit(1)
+    out.print(
+        "[green]Phone camera is on.[/green] Pick [bold]Loopback video device[/bold] "
+        "in your app. Stop it with [bold]phonecam stop[/bold]."
+    )
+
+
+@cli.command()
+def stop():
+    """Stop the phone camera."""
+    out.print("Phone camera stopped." if stop_stream() else "Phone camera was not running.")
+
+
+@cli.command()
+def status():
+    """Say whether the phone camera is running."""
+    out.print("[green]running[/green]" if running() else "[dim]not running[/dim]")
+
+
+if __name__ == "__main__":
+    cli()
